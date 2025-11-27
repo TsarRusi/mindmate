@@ -1,0 +1,3 @@
+git add bot.py
+git commit -m "Fix bot.py"
+git push origin main
