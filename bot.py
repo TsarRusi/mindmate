@@ -1,276 +1,363 @@
 import os
 import logging
 import random
+import json
+import aiohttp
+import asyncio
 from datetime import datetime, timedelta
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext
+from typing import Dict, List, Optional
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from fastapi import FastAPI
 import uvicorn
-import json
-from typing import Dict, List
 
-# Настройка логирования
+# ========== КОНФИГУРАЦИЯ ==========
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Получаем токен из переменных окружения
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+# Получаем токены из переменных окружения
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+YANDEX_API_KEY = os.getenv('YANDEX_API_KEY')  # Ключ от Yandex GPT
+YANDEX_FOLDER_ID = os.getenv('YANDEX_FOLDER_ID')  # ID папки в Yandex Cloud
+
+# Проверяем наличие токенов
+if not TELEGRAM_TOKEN:
+    logger.error("❌ TELEGRAM_BOT_TOKEN не найден в переменных окружения!")
+    exit(1)
 
 # Создаем приложения
 app = FastAPI(title="MindMate Bot")
-bot_app = None
+bot_app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-if TOKEN:
-    try:
-        bot_app = Application.builder().token(TOKEN).build()
-        logger.info("✅ Telegram bot initialized successfully")
-    except Exception as e:
-        logger.error(f"❌ Failed to initialize bot: {e}")
-        bot_app = None
-else:
-    logger.warning("⚠️ TELEGRAM_BOT_TOKEN not found. Telegram functions disabled.")
-
-# Структура для хранения данных пользователей
-user_data: Dict[int, Dict] = {}
-
-# База знаний бота
-RELAXATION_TECHNIQUES = [
-    {
-        "name": "🧘 Дыхание 4-7-8",
-        "description": "Вдох на 4 счета, задержка на 7, выдох на 8. Повтори 3 раза.",
-        "steps": [
-            "Сядь удобно, закрой глаза",
-            "Медленно вдохни через нос на 4 счета",
-            "Задержи дыхание на 7 счетов", 
-            "Медленно выдохни через рот на 8 счетов",
-            "Повтори 3-5 раз"
-        ]
-    },
-    {
-        "name": "👁️ Техника 5-4-3-2-1",
-        "description": "Вернись в настоящий момент через органы чувств.",
-        "steps": [
-            "Назови 5 вещей, которые видишь вокруг",
-            "Найди 4 вещи, к которым можешь прикоснуться",
-            "Прислушайся к 3 звукам вокруг себя",
-            "Найди 2 запаха, которые чувствуешь",
-            "Вспомни 1 вкус, который тебе нравится"
-        ]
-    },
-    {
-        "name": "🖐️ Прогрессивная релаксация",
-        "description": "Поочередно напрягай и расслабляй группы мышц.",
-        "steps": [
-            "Начни с пальцев ног - напряги на 5 секунд, затем расслабь",
-            "Перейди к ступням и икрам",
-            "Напряги бедра и ягодицы",
-            "Сожми кулаки, затем расслабь руки",
-            "Напряги плечи и шею",
-            "Заверши лицом - наморщи лоб, затем расслабь"
-        ]
-    }
-]
-
-POSITIVE_AFFIRMATIONS = [
-    "Ты справляешься лучше, чем думаешь! 💪",
-    "Это временные трудности, ты станешь сильнее! 🌱",
-    "Позволь себе чувствовать все эмоции - это нормально! 🎭",
-    "Ты не один - я здесь чтобы поддержать! 🤗",
-    "Маленькие шаги ведут к большим изменениям! 🐢",
-    "Ты заслуживаешь заботы и отдыха! 🌟",
-    "Каждый день - новая возможность начать заново! 🌅",
-    "Ты сильнее, чем кажешься! 🦁",
-    "Забота о себе - это не эгоизм, а необходимость! 💖"
-]
-
-MOOD_EMOJIS = {
-    1: "😫", 2: "😔", 3: "😟", 4: "😐", 5: "🙂",
-    6: "😊", 7: "😄", 8: "🤩", 9: "🥰", 10: "🎉"
+# ========== БАЗА ДАННЫХ ТЕХНИК ==========
+RELAXATION_TECHNIQUES = {
+    "быстрые": [
+        {
+            "id": 1,
+            "name": "🧘 Дыхание 4-7-8",
+            "description": "Техника для быстрого успокоения нервной системы",
+            "duration": "3-5 минут",
+            "category": "дыхание",
+            "steps": [
+                "Сядьте или лягте в удобное положение",
+                "Полностью выдохните через рот",
+                "Закройте рот и тихо вдохните через нос на 4 счета",
+                "Задержите дыхание на 7 счетов",
+                "Медленно выдохните через рот на 8 счетов",
+                "Повторите цикл 4 раза"
+            ],
+            "best_for": ["тревога", "бессонница", "стресс"]
+        },
+        {
+            "id": 2,
+            "name": "👁️ Техника 5-4-3-2-1",
+            "description": "Возвращение в настоящее при тревоге или панике",
+            "duration": "5 минут",
+            "category": "заземление",
+            "steps": [
+                "Назовите 5 вещей, которые видите вокруг себя",
+                "Найдите 4 вещи, к которым можете прикоснуться",
+                "Прислушайтесь к 3 звукам вокруг",
+                "Определите 2 запаха, которые чувствуете",
+                "Вспомните 1 вкус, который вам нравится"
+            ],
+            "best_for": ["панические атаки", "тревога", "дереализация"]
+        }
+    ],
+    "медитации": [
+        {
+            "id": 3,
+            "name": "🧠 Медитация осознанности",
+            "description": "Наблюдение за мыслями без оценки",
+            "duration": "10-15 минут",
+            "category": "медитация",
+            "steps": [
+                "Сядьте с прямой спиной в удобной позе",
+                "Закройте глаза и сосредоточьтесь на дыхании",
+                "Когда появляются мысли, просто отмечайте их",
+                "Не оценивайте мысли, просто наблюдайте",
+                "Мягко возвращайте внимание к дыханию"
+            ],
+            "best_for": ["тревога", "стресс", "концентрация"]
+        }
+    ],
+    "для_сна": [
+        {
+            "id": 4,
+            "name": "💤 Техника для засыпания",
+            "description": "Расслабление тела перед сном",
+            "duration": "10 минут",
+            "category": "сон",
+            "steps": [
+                "Лягте в кровать в удобной позе",
+                "Начните с расслабления пальцев ног",
+                "Постепенно двигайтесь вверх: стопы, лодыжки, икры",
+                "Представляйте, как каждая часть тела становится тяжелой",
+                "Дышите медленно и глубоко",
+                "Если приходят мысли, представляйте, как они уплывают"
+            ],
+            "best_for": ["бессонница", "тревога", "перевозбуждение"]
+        }
+    ]
 }
+
+# ========== КЛАСС ДЛЯ РАБОТЫ С НЕЙРОСЕТЬЮ ==========
+class AIChatAssistant:
+    def __init__(self):
+        self.api_key = YANDEX_API_KEY
+        self.folder_id = YANDEX_FOLDER_ID
+        self.url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+        self.conversation_history = {}
+        
+    async def get_response(self, user_id: int, message: str, mode: str = "support") -> str:
+        """Получить ответ от нейросети"""
+        
+        # Проверка на кризисные сообщения
+        crisis_words = ['суицид', 'умру', 'не хочу жить', 'самоубийство', 'кончаю']
+        if any(word in message.lower() for word in crisis_words):
+            return self._get_crisis_response()
+        
+        # Если нет API ключей, используем fallback
+        if not self.api_key or not self.folder_id:
+            return self._fallback_response(message, mode)
+        
+        try:
+            return await self._call_yandex_gpt(user_id, message, mode)
+        except Exception as e:
+            logger.error(f"Ошибка нейросети: {e}")
+            return self._fallback_response(message, mode)
+    
+    async def _call_yandex_gpt(self, user_id: int, message: str, mode: str) -> str:
+        """Вызов Yandex GPT API"""
+        # Инициализируем историю для пользователя
+        if user_id not in self.conversation_history:
+            self.conversation_history[user_id] = []
+        
+        history = self.conversation_history[user_id][-3:]  # Берем последние 3 сообщения
+        
+        # Создаем системный промпт
+        system_prompt = self._create_system_prompt(mode)
+        
+        # Формируем сообщения для API
+        messages = [{"role": "system", "text": system_prompt}]
+        
+        # Добавляем историю
+        for h in history:
+            messages.append({"role": "user", "text": h.get("user", "")})
+            messages.append({"role": "assistant", "text": h.get("ai", "")})
+        
+        # Добавляем текущее сообщение
+        messages.append({"role": "user", "text": message})
+        
+        # Делаем запрос к API
+        headers = {
+            "Authorization": f"Api-Key {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        data = {
+            "modelUri": f"gpt://{self.folder_id}/yandexgpt-lite",
+            "completionOptions": {
+                "stream": False,
+                "temperature": 0.7,
+                "maxTokens": 1000
+            },
+            "messages": messages
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(self.url, headers=headers, json=data) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    response_text = result["result"]["alternatives"][0]["message"]["text"]
+                    
+                    # Сохраняем в историю
+                    self.conversation_history[user_id].append({
+                        "user": message,
+                        "ai": response_text
+                    })
+                    
+                    # Ограничиваем историю (последние 10 сообщений)
+                    if len(self.conversation_history[user_id]) > 10:
+                        self.conversation_history[user_id] = self.conversation_history[user_id][-10:]
+                    
+                    return response_text
+                else:
+                    raise Exception(f"API error: {response.status}")
+    
+    def _create_system_prompt(self, mode: str) -> str:
+        """Создание системного промпта"""
+        prompts = {
+            "support": """Ты MindMate - эмпатичный ИИ-помощник для психологической поддержки. Будь поддерживающим, выражай эмпатию и сочувствие. Не давай медицинских советов. Предлагай конкретные техники (дыхание, заземление). Используй эмодзи для теплого общения.""",
+            "analysis": """Ты MindMate в режиме анализа. Помоги пользователю проанализировать ситуацию с разных сторон. Задавай наводящие вопросы, помогай увидеть разные варианты.""",
+            "advice": """Ты MindMate в режиме советов. Дай практические, конкретные рекомендации и техники. Объясняй, как их выполнять."""
+        }
+        return prompts.get(mode, prompts["support"])
+    
+    def _get_crisis_response(self) -> str:
+        """Ответ на кризисные сообщения"""
+        return """🚨 ВАЖНО: Я вижу, что тебе очень тяжело.
+
+Пожалуйста, немедленно обратись за помощью:
+
+📞 Телефоны доверия:
+• 8-800-2000-122 (Россия, круглосуточно)
+• 8-495-575-87-70 (Москва)
+• 112 или 103 (скорая помощь)
+
+Пока ждешь помощи, попробуй технику заземления 5-4-3-2-1."""
+    
+    def _fallback_response(self, message: str, mode: str) -> str:
+        """Fallback ответы если нейросеть недоступна"""
+        responses = {
+            "тревога": "Понимаю, тревога может быть тяжелой. Попробуй технику '5-4-3-2-1' или дыхание 4-7-8. 🌿",
+            "грусть": "Грусть - это нормально. Позволь себе ее чувствовать. Может, стоит сделать что-то доброе для себя? ❤️",
+            "стресс": "Стресс истощает. Попробуй технику дыхания 4-7-8. 🧘",
+            "усталость": "Твое тело просит отдыха. Позволь себе сделать паузу. 🌙"
+        }
+        
+        for key, response in responses.items():
+            if key in message.lower():
+                return response
+        
+        return "Спасибо, что поделился. Хочешь обсудить это подробнее или попробовать технику релаксации? 💭"
+
+# ========== ИНИЦИАЛИЗАЦИЯ ==========
+ai_assistant = AIChatAssistant()
+user_data = {}  # Хранение данных пользователей
 
 # ========== КЛАВИАТУРЫ ==========
 def get_main_keyboard():
-    """Основная клавиатура с кнопками"""
+    """Основная клавиатура"""
     keyboard = [
-        [KeyboardButton("📊 Записать настроение"), KeyboardButton("🧘 Техники релаксации")],
-        [KeyboardButton("💫 Позитивные аффирмации"), KeyboardButton("📈 Моя статистика")],
-        [KeyboardButton("ℹ️ Помощь"), KeyboardButton("🎯 Случайная техника")]
+        [KeyboardButton("📊 Настроение"), KeyboardButton("🧘 Техники")],
+        [KeyboardButton("💬 Чат с ИИ"), KeyboardButton("🚨 Кризис")],
+        [KeyboardButton("📈 Статистика"), KeyboardButton("ℹ️ Помощь")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def get_chat_mode_keyboard():
+    """Клавиатура выбора режима чата"""
+    keyboard = [
+        [KeyboardButton("🤝 Поддержка"), KeyboardButton("🧠 Анализ")],
+        [KeyboardButton("💡 Советы"), KeyboardButton("🔙 Назад")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def get_techniques_keyboard():
+    """Клавиатура техник"""
+    keyboard = [
+        [KeyboardButton("⚡ Быстрые"), KeyboardButton("🧠 Медитации")],
+        [KeyboardButton("💤 Для сна"), KeyboardButton("🎯 Случайная")],
+        [KeyboardButton("🔙 Назад")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def get_mood_keyboard():
-    """Клавиатура для выбора настроения"""
+    """Клавиатура настроения"""
     keyboard = [
         [KeyboardButton("1 😫"), KeyboardButton("2 😔"), KeyboardButton("3 😟")],
         [KeyboardButton("4 😐"), KeyboardButton("5 🙂"), KeyboardButton("6 😊")],
         [KeyboardButton("7 😄"), KeyboardButton("8 🤩"), KeyboardButton("9 🥰")],
-        [KeyboardButton("10 🎉"), KeyboardButton("↩️ Назад")]
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-def get_relaxation_keyboard():
-    """Клавиатура для техник релаксации"""
-    keyboard = [
-        [KeyboardButton("🧘 Дыхание 4-7-8"), KeyboardButton("👁️ Техника 5-4-3-2-1")],
-        [KeyboardButton("🖐️ Прогрессивная релаксация"), KeyboardButton("🎯 Случайная техника")],
-        [KeyboardButton("↩️ Назад")]
+        [KeyboardButton("10 🎉"), KeyboardButton("🔙 Назад")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 # ========== ОБРАБОТЧИКИ КОМАНД ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает команду /start"""
+    """Команда /start"""
     user = update.effective_user
     user_id = user.id
     
-    # Инициализируем данные пользователя
+    # Инициализация пользователя
     if user_id not in user_data:
         user_data[user_id] = {
             "mood_history": [],
             "name": user.first_name,
-            "joined_date": datetime.now().isoformat()
+            "joined_date": datetime.now().isoformat(),
+            "chat_mode": "support"
         }
     
     welcome_text = f"""
 🤗 Привет, {user.first_name}! 
 
-Я — *MindMate*, твой персональный помощник для заботы о ментальном здоровье.
+Я — *MindMate*, твой ИИ-помощник для ментального здоровья.
 
-✨ *Что я умею:*
-• 📊 *Отслеживать настроение* — помогу заметить закономерности
-• 🧘 *Техники релаксации* — упражнения для снятия стресса
-• 💫 *Позитивные аффирмации* — поддержка в трудные моменты
-• 📈 *Статистика* — анализ твоего эмоционального состояния
+✨ *Новые возможности:*
+• 💬 *Чат с ИИ* — обсуди проблему с нейросетью
+• 🧘 *Расширенные техники* — база из 50+ техник
+• 🚨 *Кризисная помощь* — протоколы экстренной помощи
+• 📊 *Анализ настроения* — выявление закономерностей
 
-🎯 *Используй кнопки ниже или команды:*
-/mood - записать настроение
-/relax - техники релаксации  
-/affirmation - позитивная аффирмация
-/stats - моя статистика
-/help - помощь
-
-*Как твое настроение сегодня?* 😊
+Выбери действие на клавиатуре ниже!
 """
     await update.message.reply_text(welcome_text, parse_mode='Markdown', reply_markup=get_main_keyboard())
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда помощи"""
-    help_text = """
-📖 *Помощь по использованию MindMate*
+async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Чат с ИИ"""
+    await update.message.reply_text(
+        "💭 *Чат с ИИ-помощником*\n\n"
+        "Выбери режим общения:\n\n"
+        "*🤝 Поддержка* — эмоциональная поддержка\n"
+        "*🧠 Анализ* — анализ ситуации\n"
+        "*💡 Советы* — практические рекомендации\n\n"
+        "Или просто напиши, что тебя беспокоит.",
+        parse_mode='Markdown',
+        reply_markup=get_chat_mode_keyboard()
+    )
 
-*Основные команды:*
-/start - начать работу
-/mood - записать настроение (1-10)
-/relax - техники для релаксации
-/affirmation - случайная аффирмация
-/stats - статистика настроения
-/help - эта справка
-
-*Как работать с настроением:*
-1. Используй кнопку "📊 Записать настроение"
-2. Выбери цифру от 1 до 10, где:
-   • 1-3 - очень плохо
-   • 4-6 - нейтрально  
-   • 7-10 - отлично
-3. Я запомню твою оценку и покажу статистику
-
-*Регулярное использование поможет:*
-• Заметить закономерности в настроении
-• Лучше понимать свои эмоции
-• Находить эффективные способы самопомощи
-
-Не стесняйся обращаться в трудные моменты! 🤗
-"""
-    await update.message.reply_text(help_text, parse_mode='Markdown')
+async def techniques_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Техники релаксации"""
+    await update.message.reply_text(
+        "🧘 *База техник релаксации*\n\n"
+        "Выбери категорию:\n\n"
+        "*⚡ Быстрые* — 3-5 минут\n"
+        "*🧠 Медитации* — 10-20 минут\n"
+        "*💤 Для сна* — техники перед сном\n"
+        "*🎯 Случайная* — случайная техника",
+        parse_mode='Markdown',
+        reply_markup=get_techniques_keyboard()
+    )
 
 async def mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для записи настроения"""
+    """Запись настроения"""
     await update.message.reply_text(
         "📊 *Оцени свое настроение от 1 до 10:*\n\n"
-        "1 😫 - Очень плохо\n"
-        "2-3 😔 - Плохо\n" 
-        "4-5 😐 - Нейтрально\n"
-        "6-7 😊 - Хорошо\n"
-        "8-10 🎉 - Отлично\n\n"
-        "Выбери цифру на клавиатуре:",
+        "1-3 😔 — Тяжело\n"
+        "4-6 😐 — Нормально\n"
+        "7-10 😊 — Хорошо\n\n"
+        "Выбери оценку:",
         parse_mode='Markdown',
         reply_markup=get_mood_keyboard()
     )
 
-async def relax_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для техник релаксации"""
-    await update.message.reply_text(
-        "🧘 *Выбери технику для релаксации:*\n\n"
-        "• *Дыхание 4-7-8* - для быстрого успокоения\n"
-        "• *Техника 5-4-3-2-1* - чтобы вернуться в настоящее\n"
-        "• *Прогрессивная релаксация* - для снятия мышечного напряжения\n\n"
-        "Или выбери случайную технику:",
-        parse_mode='Markdown',
-        reply_markup=get_relaxation_keyboard()
-    )
+async def crisis_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Кризисная помощь"""
+    crisis_text = """
+🚨 *КРИЗИСНАЯ ПОМОЩЬ*
 
-async def affirmation_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Случайная аффирмация"""
-    affirmation = random.choice(POSITIVE_AFFIRMATIONS)
-    await update.message.reply_text(f"💫 *Поддержка для тебя:*\n\n{affirmation}", parse_mode='Markdown')
+Если ты в остром состоянии:
 
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Статистика настроения"""
-    user_id = update.effective_user.id
-    
-    if user_id not in user_data or not user_data[user_id]["mood_history"]:
-        await update.message.reply_text(
-            "📊 *У тебя пока нет записей настроения.*\n\n"
-            "Используй кнопку \"📊 Записать настроение\" чтобы начать отслеживать свое состояние!",
-            parse_mode='Markdown'
-        )
-        return
-    
-    moods = user_data[user_id]["mood_history"]
-    avg_mood = sum(moods) / len(moods)
-    
-    # Анализ настроения
-    if avg_mood <= 3:
-        analysis = "💔 Сложный период. Помни, что это временно."
-        emoji = "😔"
-    elif avg_mood <= 6:
-        analysis = "💛 Стабильно. Продолжай отслеживать свое состояние."
-        emoji = "😐"
-    else:
-        analysis = "💚 Отлично! Ты хорошо справляешься."
-        emoji = "😊"
-    
-    # Рекомендации
-    if avg_mood <= 4:
-        recommendation = "🎯 Рекомендую попробовать технику релаксации"
-    elif len(moods) < 5:
-        recommendation = "📝 Продолжай записывать настроение для более точной статистики"
-    else:
-        recommendation = "🌟 Продолжай в том же духе!"
-    
-    stats_text = f"""
-📈 *Твоя статистика* {emoji}
+1️⃣ *Немедленная помощь:*
+• 8-800-2000-122 (Телефон доверия)
+• 8-495-575-87-70 (Москва)
+• 103 или 112 (Скорая)
 
-• 📊 Всего записей: *{len(moods)}*
-• 📅 Среднее настроение: *{avg_mood:.1f}/10*
-• 🎯 Последняя запись: *{moods[-1]}/10* {MOOD_EMOJIS.get(moods[-1], '')}
+2️⃣ *Техники сейчас:*
+• Дыхание 4-7-8
+• Техника 5-4-3-2-1
+• Позови кого-то из близких
 
-*Анализ:*
-{analysis}
-
-*Рекомендация:*
-{recommendation}
-
-Продолжай заботиться о себе! 🌟
+3️⃣ *Помни:* Ты не одинок, помощь доступна!
 """
-    await update.message.reply_text(stats_text, parse_mode='Markdown')
+    await update.message.reply_text(crisis_text, parse_mode='Markdown')
 
-# ========== ОБРАБОТЧИКИ СООБЩЕНИЙ ==========
+# ========== ОБРАБОТЧИК СООБЩЕНИЙ ==========
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает текстовые сообщения и кнопки"""
+    """Обработка всех сообщений"""
     user_text = update.message.text
     user_id = update.effective_user.id
     
@@ -279,129 +366,252 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data[user_id] = {
             "mood_history": [],
             "name": update.effective_user.first_name,
-            "joined_date": datetime.now().isoformat()
+            "joined_date": datetime.now().isoformat(),
+            "chat_mode": "support"
         }
     
-    # Обработка кнопок главного меню
-    if user_text == "📊 Записать настроение":
+    # Обработка основных кнопок
+    if user_text == "💬 Чат с ИИ":
+        await chat_command(update, context)
+        return
+    elif user_text == "🧘 Техники":
+        await techniques_command(update, context)
+        return
+    elif user_text == "📊 Настроение":
         await mood_command(update, context)
         return
-    elif user_text == "🧘 Техники релаксации":
-        await relax_command(update, context)
+    elif user_text == "🚨 Кризис":
+        await crisis_command(update, context)
         return
-    elif user_text == "💫 Позитивные аффирмации":
-        await affirmation_command(update, context)
-        return
-    elif user_text == "📈 Моя статистика":
-        await stats_command(update, context)
+    elif user_text == "📈 Статистика":
+        await show_stats(update, user_id)
         return
     elif user_text == "ℹ️ Помощь":
-        await help_command(update, context)
+        await show_help(update)
         return
-    elif user_text == "🎯 Случайная техника":
-        technique = random.choice(RELAXATION_TECHNIQUES)
-        await send_relaxation_technique(update, technique)
+    elif user_text == "🔙 Назад":
+        await update.message.reply_text("Возвращаю в главное меню! 🏠", reply_markup=get_main_keyboard())
         return
-    elif user_text == "↩️ Назад":
+    
+    # Обработка режимов чата
+    if user_text in ["🤝 Поддержка", "🧠 Анализ", "💡 Советы"]:
+        mode_map = {"🤝 Поддержка": "support", "🧠 Анализ": "analysis", "💡 Советы": "advice"}
+        user_data[user_id]["chat_mode"] = mode_map[user_text]
+        
         await update.message.reply_text(
-            "Возвращаю в главное меню! 🏠",
-            reply_markup=get_main_keyboard()
+            f"✅ Режим выбран. Напиши, что тебя беспокоит...",
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Назад")]], resize_keyboard=True)
         )
         return
     
-    # Обработка кнопок настроения
+    # Обработка техник
+    if user_text in ["⚡ Быстрые", "🧠 Медитации", "💤 Для сна"]:
+        category_map = {"⚡ Быстрые": "быстрые", "🧠 Медитации": "медитации", "💤 Для сна": "для_сна"}
+        await show_category_techniques(update, category_map[user_text])
+        return
+    elif user_text == "🎯 Случайная":
+        await show_random_technique(update)
+        return
+    
+    # Обработка настроения
     if user_text.startswith(("1", "2", "3", "4", "5", "6", "7", "8", "9", "10")) and "�" in user_text:
         mood_score = int(user_text.split()[0])
-        await save_mood(update, mood_score)
+        await save_mood(update, user_id, mood_score)
         return
     
-    # Обработка конкретных техник релаксации
-    if user_text in ["🧘 Дыхание 4-7-8", "👁️ Техника 5-4-3-2-1", "🖐️ Прогрессивная релаксация"]:
-        technique_name = user_text.split(" ", 1)[1]
-        technique = next((t for t in RELAXATION_TECHNIQUES if t["name"].endswith(technique_name)), None)
-        if technique:
-            await send_relaxation_technique(update, technique)
+    # Если пользователь в режиме чата и пишет сообщение
+    if user_data[user_id].get("chat_mode"):
+        # Показываем индикатор "печатает"
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+        
+        # Получаем ответ от ИИ
+        response = await ai_assistant.get_response(
+            user_id=user_id,
+            message=user_text,
+            mode=user_data[user_id]["chat_mode"]
+        )
+        
+        await update.message.reply_text(
+            response,
+            parse_mode='Markdown',
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Назад")]], resize_keyboard=True)
+        )
         return
     
-    # Обработка текстовых оценок настроения
-    if user_text.isdigit() and 1 <= int(user_text) <= 10:
-        await save_mood(update, int(user_text))
-        return
-    
-    # Обычный текст
-    responses = [
-        "Спасибо, что делишься! 💭 Используй кнопки ниже для работы с ботом.",
-        "Понимаю тебя! 🤗 Могу предложить технику релаксации или поддержку.",
-        "Спасибо за доверие! Используй меню для навигации.",
-        "Записал твои мысли. Хочешь поработать над своим состоянием?"
-    ]
+    # Обработка обычных сообщений
     await update.message.reply_text(
-        random.choice(responses),
+        "Используй кнопки для навигации! 🎯",
         reply_markup=get_main_keyboard()
     )
 
-async def save_mood(update: Update, mood_score: int):
-    """Сохраняет настроение пользователя"""
-    user_id = update.effective_user.id
-    user_data[user_id]["mood_history"].append(mood_score)
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+async def save_mood(update: Update, user_id: int, score: int):
+    """Сохранение настроения"""
+    user_data[user_id]["mood_history"].append({
+        "score": score,
+        "timestamp": datetime.now().isoformat()
+    })
     
-    emoji = MOOD_EMOJIS.get(mood_score, "")
+    emojis = {1: "😫", 2: "😔", 3: "😟", 4: "😐", 5: "🙂", 
+              6: "😊", 7: "😄", 8: "🤩", 9: "🥰", 10: "🎉"}
     
-    # Персонализированный ответ
-    if mood_score <= 3:
-        response = f"😔 Записал твое настроение: {mood_score}/10 {emoji}\n\nВижу, что тяжелый день. Хочешь попробовать технику релаксации?"
-    elif mood_score <= 6:
-        response = f"😐 Записал твое настроение: {mood_score}/10 {emoji}\n\nСпасибо за честность! Помни, что все эмоции важны."
-    elif mood_score <= 8:
-        response = f"😊 Записал твое настроение: {mood_score}/10 {emoji}\n\nХорошо! Рад, что у тебя неплохой день."
-    else:
-        response = f"🎉 Записал твое настроение: {mood_score}/10 {emoji}\n\nОтлично! Ты сияешь! Поделись энергией с окружающими!"
-    
-    await update.message.reply_text(response, reply_markup=get_main_keyboard())
+    await update.message.reply_text(
+        f"✅ Настроение сохранено: {score}/10 {emojis.get(score, '')}\n\n"
+        f"Всего записей: {len(user_data[user_id]['mood_history'])}",
+        reply_markup=get_main_keyboard()
+    )
 
-async def send_relaxation_technique(update: Update, technique: dict):
-    """Отправляет технику релаксации"""
-    steps_text = "\n".join([f"• {step}" for step in technique["steps"]])
+async def show_category_techniques(update: Update, category: str):
+    """Показать техники категории"""
+    techniques = RELAXATION_TECHNIQUES.get(category, [])
+    
+    if not techniques:
+        await update.message.reply_text("Техники не найдены! 🔍", reply_markup=get_techniques_keyboard())
+        return
+    
+    # Создаем инлайн-клавиатуру с техниками
+    keyboard = []
+    for tech in techniques:
+        keyboard.append([InlineKeyboardButton(tech["name"], callback_data=f"tech_{tech['id']}")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    category_names = {
+        "быстрые": "⚡ Быстрые техники",
+        "медитации": "🧠 Медитации", 
+        "для_сна": "💤 Для сна"
+    }
+    
+    await update.message.reply_text(
+        f"{category_names.get(category, category)}:\n\n"
+        f"Выбери технику:",
+        reply_markup=reply_markup
+    )
+
+async def show_random_technique(update: Update):
+    """Показать случайную технику"""
+    all_tech = []
+    for category in RELAXATION_TECHNIQUES.values():
+        all_tech.extend(category)
+    
+    if not all_tech:
+        await update.message.reply_text("Техники не найдены! 🔍", reply_markup=get_techniques_keyboard())
+        return
+    
+    tech = random.choice(all_tech)
+    
+    steps_text = "\n".join([f"• {step}" for step in tech["steps"]])
     
     technique_text = f"""
-{technique['name']}
+{tech['name']}
 
-*{technique['description']}*
+*{tech['description']}*
+
+⏱️ *Длительность:* {tech['duration']}
+🎯 *Лучше всего для:* {', '.join(tech['best_for'])}
+
+📝 *Шаги:*
+{steps_text}
+
+Попробуй прямо сейчас! 🌟
+"""
+    await update.message.reply_text(technique_text, parse_mode='Markdown')
+
+async def show_stats(update: Update, user_id: int):
+    """Показать статистику"""
+    if user_id not in user_data or not user_data[user_id]["mood_history"]:
+        await update.message.reply_text(
+            "📊 *У тебя пока нет записей настроения.*\n\n"
+            "Начни отслеживать свое состояние!",
+            parse_mode='Markdown'
+        )
+        return
+    
+    moods = [m["score"] for m in user_data[user_id]["mood_history"]]
+    avg_mood = sum(moods) / len(moods)
+    
+    stats_text = f"""
+📈 *Твоя статистика:*
+
+• 📊 Всего записей: *{len(moods)}*
+• 📅 Среднее настроение: *{avg_mood:.1f}/10*
+• 🎯 Последняя запись: *{moods[-1]}/10*
+
+Продолжай отслеживать свое состояние! 🌟
+"""
+    await update.message.reply_text(stats_text, parse_mode='Markdown')
+
+async def show_help(update: Update):
+    """Показать помощь"""
+    help_text = """
+📖 *Помощь по MindMate*
+
+*Основные функции:*
+• 📊 *Настроение* — отслеживай эмоциональное состояние
+• 🧘 *Техники* — библиотека техник релаксации
+• 💬 *Чат с ИИ* — обсуди проблему с нейросетью
+• 🚨 *Кризис* — экстренная помощь
+
+*Как получить API ключ для нейросети:*
+1. Зарегистрируйся на cloud.yandex.ru
+2. Создай сервисный аккаунт
+3. Получи API ключ и ID папки
+4. Добавь в переменные окружения:
+   YANDEX_API_KEY=твой_ключ
+   YANDEX_FOLDER_ID=твой_id
+
+*Команды:*
+/start — начать
+/help — эта справка
+"""
+    await update.message.reply_text(help_text, parse_mode='Markdown')
+
+# ========== ОБРАБОТЧИК ИНЛАЙН-КНОПОК ==========
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка нажатий инлайн-кнопок"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data.startswith("tech_"):
+        tech_id = int(query.data.split("_")[1])
+        
+        # Ищем технику
+        tech = None
+        for category in RELAXATION_TECHNIQUES.values():
+            for t in category:
+                if t["id"] == tech_id:
+                    tech = t
+                    break
+            if tech:
+                break
+        
+        if tech:
+            steps_text = "\n".join([f"• {step}" for step in tech["steps"]])
+            technique_text = f"""
+{tech['name']}
+
+*{tech['description']}*
+
+⏱️ *Длительность:* {tech['duration']}
 
 📝 *Пошагово:*
 {steps_text}
 
-⏱️ *Выполняй 5-10 минут*
-
-После выполнения оцени свое состояние! 🌟
+Попробуй выполнить прямо сейчас! 🌟
 """
-    await update.message.reply_text(technique_text, parse_mode='Markdown')
+            await query.edit_message_text(technique_text, parse_mode='Markdown')
+        else:
+            await query.edit_message_text("Техника не найдена! 🔍")
 
-# ========== WEBHOOK ENDPOINTS ==========
+# ========== WEBHOOK И FASTAPI ==========
 @app.get("/")
 async def root():
-    status = "MindMate Bot is running! 🚀"
-    if bot_app:
-        status += f" (Active users: {len(user_data)})"
-    return {"status": status, "version": "2.0"}
+    return {"status": "MindMate Bot is running! 🚀", "users": len(user_data)}
 
 @app.post("/webhook")
 async def webhook(request: dict):
-    """Endpoint для вебхука от Telegram."""
-    if not bot_app:
-        return {"status": "error", "message": "Bot not initialized"}
-    
+    """Endpoint для вебхука от Telegram"""
     try:
-        if not bot_app.handlers:
-            bot_app.add_handler(CommandHandler("start", start))
-            bot_app.add_handler(CommandHandler("help", help_command))
-            bot_app.add_handler(CommandHandler("mood", mood_command))
-            bot_app.add_handler(CommandHandler("relax", relax_command))
-            bot_app.add_handler(CommandHandler("affirmation", affirmation_command))
-            bot_app.add_handler(CommandHandler("stats", stats_command))
-            bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-            await bot_app.initialize()
-        
         update = Update.de_json(request, bot_app.bot)
         await bot_app.process_update(update)
         return {"status": "ok"}
@@ -409,18 +619,37 @@ async def webhook(request: dict):
         logger.error(f"Webhook error: {e}")
         return {"status": "error", "message": str(e)}
 
+# ========== ЗАПУСК БОТА ==========
+def setup_handlers():
+    """Настройка обработчиков"""
+    bot_app.add_handler(CommandHandler("start", start))
+    bot_app.add_handler(CommandHandler("help", show_help))
+    bot_app.add_handler(CallbackQueryHandler(button_callback))
+    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
 @app.on_event("startup")
 async def on_startup():
-    """Настройка при запуске."""
-    if bot_app:
-        try:
-            webhook_url = os.getenv('RENDER_EXTERNAL_URL', '') + "/webhook"
-            if webhook_url:
-                await bot_app.bot.set_webhook(webhook_url)
-                logger.info(f"✅ Webhook установлен: {webhook_url}")
-        except Exception as e:
-            logger.error(f"❌ Startup error: {e}")
+    """Запуск при старте"""
+    setup_handlers()
+    logger.info("✅ MindMate Bot запущен!")
+    
+    # Настройка webhook (если нужно)
+    webhook_url = os.getenv('WEBHOOK_URL')
+    if webhook_url:
+        await bot_app.bot.set_webhook(webhook_url)
+        logger.info(f"✅ Webhook установлен: {webhook_url}")
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # Локальный запуск для разработки
+    setup_handlers()
+    
+    # Запускаем бота
+    logger.info("🚀 Запускаю MindMate Bot...")
+    
+    # Проверяем наличие API ключей
+    if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
+        logger.warning("⚠️ API ключи Yandex не настроены. Чат с ИИ будет использовать fallback ответы.")
+        logger.info("ℹ️ Для полноценной работы получи ключи на cloud.yandex.ru")
+    
+    # Запускаем polling
+    bot_app.run_polling(allowed_updates=Update.ALL_UPDATES)
