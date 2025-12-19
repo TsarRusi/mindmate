@@ -3,10 +3,4 @@ fastapi==0.104.0
 uvicorn==0.24.0
 python-dotenv==1.0.0
 requests==2.31.0
-aiohttp==3.9.1
-sqlalchemy==2.0.23
-psycopg2-binary==2.9.7
-pydantic==2.5.0
-transformers==4.35.0  # Для локального анализа настроения
-torch==2.1.0  # Для локальных моделей
-scikit-learn==1.3.2  # Для анализа паттернов
+aiofiles==23.2.1
