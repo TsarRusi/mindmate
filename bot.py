@@ -6,11 +6,10 @@ from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from fastapi import FastAPI
 import uvicorn
-import asyncio
 
 # Импортируем наши модули
-from ai_service import AIService
-from crisis_handler import CrisisHandler
+from ai_service import ai_service
+from crisis_handler import crisis_handler
 
 # Настройка логирования
 logging.basicConfig(
@@ -21,10 +20,6 @@ logger = logging.getLogger(__name__)
 
 # Получаем токен из переменных окружения
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-
-# Инициализируем сервисы
-ai_service = AIService()
-crisis_handler = CrisisHandler()
 
 # Создаем приложения
 app = FastAPI(title="MindMate Bot")
@@ -40,22 +35,22 @@ if TOKEN:
 else:
     logger.warning("⚠️ TELEGRAM_BOT_TOKEN not found. Telegram functions disabled.")
 
-# База данных в памяти
+# База данных в памяти (временно, можно заменить на базу)
 user_data = {}
 
 # ========== КЛАВИАТУРЫ ==========
 def get_main_keyboard():
-    """Основная клавиатура"""
+    """Основная клавиатура с кнопками"""
     keyboard = [
         [KeyboardButton("📊 Записать настроение"), KeyboardButton("🧘 Техники релаксации")],
         [KeyboardButton("💫 Позитивные аффирмации"), KeyboardButton("📈 Моя статистика")],
-        [KeyboardButton("💬 Чат с помощником"), KeyboardButton("🚨 Кризисная помощь")],
+        [KeyboardButton("💬 Чат с ИИ-помощником"), KeyboardButton("🚨 Кризисная помощь")],
         [KeyboardButton("ℹ️ Помощь")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def get_mood_keyboard():
-    """Клавиатура для настроения"""
+    """Клавиатура для выбора настроения"""
     keyboard = [
         [KeyboardButton("1 😫"), KeyboardButton("2 😔"), KeyboardButton("3 😟")],
         [KeyboardButton("4 😐"), KeyboardButton("5 🙂"), KeyboardButton("6 😊")],
@@ -64,9 +59,10 @@ def get_mood_keyboard():
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-def get_chat_keyboard():
-    """Клавиатура для чата"""
+def get_chat_mode_keyboard():
+    """Клавиатура в режиме чата"""
     keyboard = [
+        [KeyboardButton("🔄 Новый вопрос"), KeyboardButton("🚨 Кризисная помощь")],
         [KeyboardButton("↩️ В главное меню")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -83,12 +79,26 @@ RELAXATION_TECHNIQUES = [
             "Медленно выдохни через рот на 8 счетов",
             "Повтори 3-5 раз"
         ]
+    },
+    {
+        "name": "👁️ Техника 5-4-3-2-1",
+        "description": "Вернись в настоящее через органы чувств.",
+        "steps": [
+            "Назови 5 вещей, которые видишь вокруг",
+            "Найди 4 вещи, к которым можешь прикоснуться",
+            "Прислушайся к 3 звукам вокруг себя",
+            "Найди 2 запаха, которые чувствуешь",
+            "Вспомни 1 вкус, который тебе нравится"
+        ]
     }
 ]
 
 POSITIVE_AFFIRMATIONS = [
     "Ты справляешься лучше, чем думаешь! 💪",
-    "Это временные трудности, ты станешь сильнее! 🌱"
+    "Это временные трудности, ты станешь сильнее! 🌱",
+    "Позволь себе чувствовать все эмоции - это нормально! 🎭",
+    "Ты не один - я здесь чтобы поддержать! 🤗",
+    "Маленькие шаги ведут к большим изменениям! 🐢"
 ]
 
 MOOD_EMOJIS = {
@@ -102,12 +112,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
     
+    # Инициализация пользователя
     if user_id not in user_data:
         user_data[user_id] = {
             "mood_history": [],
             "name": user.first_name,
             "joined_date": datetime.now().isoformat(),
-            "in_chat_mode": False
+            "in_chat_mode": False,
+            "chat_history": []
         }
     
     welcome_text = f"""
@@ -116,14 +128,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Я — *MindMate*, твой персональный помощник для заботы о ментальном здоровье.
 
 ✨ *Что я умею:*
-• 📊 Отслеживать настроение
-• 🧘 Техники релаксации  
-• 💫 Позитивные аффирмации
-• 📈 Статистика настроения
-• 💬 Чат с ИИ-помощником
-• 🚨 Кризисная помощь
+• 📊 *Отслеживать настроение* — помогу заметить закономерности
+• 🧘 *Техники релаксации* — упражнения для снятия стресса  
+• 💫 *Позитивные аффирмации* — поддержка в трудные моменты
+• 📈 *Статистика* — анализ твоего эмоционального состояния
+• 💬 *Чат с ИИ-помощником* — умные ответы на твои вопросы
+• 🚨 *Кризисная помощь* — контакты экстренных служб
 
-*Используй кнопки ниже для навигации.*
+🎯 *Используй кнопки ниже для навигации!*
 
 *Важно:* Я - бот-помощник, а не медицинский специалист.
 В критических ситуациях обращайтесь к профессионалам.
@@ -136,23 +148,24 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📖 *Помощь по использованию MindMate*
 
 *Основные функции:*
-• 📊 *Записать настроение* - отслеживай свое состояние
-• 🧘 *Техники релаксации* - упражнения для снятия стресса
-• 💫 *Позитивные аффирмации* - поддержка в трудные моменты
-• 📈 *Моя статистика* - анализ твоего настроения
-• 💬 *Чат с помощником* - общение с ИИ-ассистентом
-• 🚨 *Кризисная помощь* - контакты экстренных служб
+• 📊 *Записать настроение* — отслеживай свое состояние
+• 🧘 *Техники релаксации* — упражнения для снятия стресса
+• 💫 *Позитивные аффирмации* — поддержка в трудные моменты
+• 📈 *Моя статистика* — анализ твоего настроения
+• 💬 *Чат с ИИ-помощником* — общение с умным помощником
+• 🚨 *Кризисная помощь* — контакты экстренных служб
 
-*Как работать с настроением:*
-1. Нажми "📊 Записать настроение"
-2. Выбери цифру от 1 до 10
-3. Я запомню твою оценку
+*Как работает чат с ИИ:*
+1. Нажми кнопку "💬 Чат с ИИ-помощником"
+2. Напиши то, что тебя беспокоит
+3. Получи поддержку и полезные советы
+4. Используй "🔄 Новый вопрос" для продолжения
 
 *Кризисная помощь:*
 Если тебе очень тяжело, нажми "🚨 Кризисная помощь"
 для получения контактов специалистов.
 
-🤗 *Помни:* обращаться за помощью - это нормально!
+🤗 *Помни:* обращаться за помощью — это нормально!
 """
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
@@ -207,12 +220,23 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     moods = user_data[user_id]["mood_history"]
     avg_mood = sum(moods) / len(moods)
     
+    # Анализ
+    if avg_mood <= 4:
+        analysis = "💔 Сложный период. Помни, что это временно."
+    elif avg_mood <= 7:
+        analysis = "💛 Стабильно. Продолжай отслеживать свое состояние."
+    else:
+        analysis = "💚 Отлично! Ты хорошо справляешься."
+    
     stats_text = f"""
 📈 *Твоя статистика:*
 
 • 📊 Всего записей: *{len(moods)}*
 • 📅 Среднее настроение: *{avg_mood:.1f}/10*
 • 🎯 Последняя запись: *{moods[-1]}/10* {MOOD_EMOJIS.get(moods[-1], '')}
+
+*Анализ:*
+{analysis}
 
 Продолжай заботиться о себе! 🌟
 """
@@ -226,20 +250,38 @@ async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "💬 *Чат с ИИ-помощником*\n\n"
         "Напиши то, что тебя беспокоит, и я постараюсь помочь.\n"
-        "Если ситуация критическая - я сразу дам контакты помощи.\n\n"
-        "Для выхода нажми '↩️ В главное меню'",
+        "Я использую DeepSeek AI для умных ответов.\n\n"
+        "*Что можно спросить:*\n"
+        "• Как справиться с тревогой?\n"
+        "• Что делать при стрессе?\n"
+        "• Как улучшить настроение?\n"
+        "• Или просто поделиться переживаниями\n\n"
+        "Используй кнопки ниже для навигации:",
         parse_mode='Markdown',
-        reply_markup=get_chat_keyboard()
+        reply_markup=get_chat_mode_keyboard()
     )
 
 async def crisis_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Кризисная помощь"""
-    response = crisis_handler.get_serious_crisis_response()
+    response = crisis_handler.get_crisis_response()
     await update.message.reply_text(response, parse_mode='Markdown')
+
+async def new_question_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Новый вопрос в чате"""
+    user_id = update.effective_user.id
+    if user_id in user_data:
+        user_data[user_id]["chat_history"] = []
+    
+    await update.message.reply_text(
+        "🔄 *Новый диалог*\n\n"
+        "Задай новый вопрос или поделись тем, что тебя беспокоит:",
+        parse_mode='Markdown',
+        reply_markup=get_chat_mode_keyboard()
+    )
 
 # ========== ОБРАБОТЧИКИ СООБЩЕНИЙ ==========
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка сообщений"""
+    """Обработка текстовых сообщений и кнопок"""
     user_text = update.message.text
     user_id = update.effective_user.id
     
@@ -249,10 +291,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "mood_history": [],
             "name": update.effective_user.first_name,
             "joined_date": datetime.now().isoformat(),
-            "in_chat_mode": False
+            "in_chat_mode": False,
+            "chat_history": []
         }
     
-    # Главное меню
+    # Обработка кнопок главного меню
     if user_text == "📊 Записать настроение":
         await mood_command(update, context)
         return
@@ -265,7 +308,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif user_text == "📈 Моя статистика":
         await stats_command(update, context)
         return
-    elif user_text == "💬 Чат с помощником":
+    elif user_text == "💬 Чат с ИИ-помощником":
         await chat_command(update, context)
         return
     elif user_text == "🚨 Кризисная помощь":
@@ -273,6 +316,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     elif user_text == "ℹ️ Помощь":
         await help_command(update, context)
+        return
+    elif user_text == "🔄 Новый вопрос":
+        await new_question_command(update, context)
         return
     
     # Навигация
@@ -290,12 +336,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await save_mood(update, mood_score)
         return
     
-    # Если пользователь в режиме чата
-    if user_data[user_id].get("in_chat_mode", False):
-        await handle_chat_message(update, user_text, user_id)
+    # Если пользователь в режиме чата с ИИ
+    if user_id in user_data and user_data[user_id].get("in_chat_mode", False):
+        await handle_ai_chat(update, user_text, user_id)
         return
     
-    # Обычные сообщения
+    # Обработка цифр настроения (без эмодзи)
+    if user_text.isdigit() and 1 <= int(user_text) <= 10:
+        await save_mood(update, int(user_text))
+        return
+    
+    # Обычные сообщения (не в режиме чата)
     responses = [
         "Используй кнопки ниже для навигации! 🤗",
         "Выбери нужную функцию из меню! 💫",
@@ -306,34 +357,60 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_main_keyboard()
     )
 
-async def handle_chat_message(update: Update, message: str, user_id: int):
-    """Обработка сообщений в чате"""
+async def handle_ai_chat(update: Update, message: str, user_id: int):
+    """Обработка сообщений в чате с ИИ"""
     # Показываем "печатает..."
     await update.message.chat.send_action(action="typing")
     
-    # Проверяем кризис
+    # Проверяем кризисный уровень
     crisis_level, crisis_desc = crisis_handler.detect_crisis_level(message)
     
+    # Если кризис 2 или 3 уровня - показываем помощь
     if crisis_level >= 2:
-        # Кризисная ситуация
-        crisis_response = crisis_handler.generate_crisis_response(crisis_level, message)
+        crisis_response = crisis_handler.get_crisis_response_by_level(crisis_level, message)
         await update.message.reply_text(crisis_response, parse_mode='Markdown')
         
-        # Также даем ответ от ИИ
-        user_context = {
-            'mood_history': user_data[user_id].get('mood_history', []),
-            'name': user_data[user_id].get('name', 'Пользователь')
-        }
+        # Добавляем запись о кризисе
+        if user_id in user_data:
+            if "crisis_log" not in user_data[user_id]:
+                user_data[user_id]["crisis_log"] = []
+            user_data[user_id]["crisis_log"].append({
+                "message": message[:100],
+                "level": crisis_level,
+                "time": datetime.now().isoformat()
+            })
+    
+    # Получаем контекст пользователя
+    user_context = {
+        'user_id': user_id,
+        'name': user_data[user_id].get('name', 'Пользователь'),
+        'mood_history': user_data[user_id].get('mood_history', []),
+        'is_crisis': crisis_level >= 2
+    }
+    
+    # Получаем ответ от ИИ
+    try:
         ai_response = await ai_service.get_ai_response(message, user_context)
-        await update.message.reply_text(f"🤖 *Помощник:*\n{ai_response}", parse_mode='Markdown')
-    else:
-        # Обычный запрос
-        user_context = {
-            'mood_history': user_data[user_id].get('mood_history', []),
-            'name': user_data[user_id].get('name', 'Пользователь')
-        }
-        ai_response = await ai_service.get_ai_response(message, user_context)
-        await update.message.reply_text(f"🤖 *Помощник:*\n{ai_response}", parse_mode='Markdown')
+        await update.message.reply_text(f"🤖 *Помощник:*\n\n{ai_response}", parse_mode='Markdown')
+        
+        # Сохраняем историю чата
+        if user_id in user_data:
+            user_data[user_id]["chat_history"].append({
+                "user": message,
+                "ai": ai_response,
+                "time": datetime.now().isoformat()
+            })
+            # Ограничиваем историю последними 10 сообщениями
+            if len(user_data[user_id]["chat_history"]) > 10:
+                user_data[user_id]["chat_history"] = user_data[user_id]["chat_history"][-10:]
+                
+    except Exception as e:
+        logger.error(f"Error in AI chat: {e}")
+        await update.message.reply_text(
+            "😔 Извини, произошла ошибка при обработке запроса.\n"
+            "Попробуй переформулировать вопрос или нажми '🔄 Новый вопрос'.",
+            reply_markup=get_chat_mode_keyboard()
+        )
 
 async def save_mood(update: Update, mood_score: int):
     """Сохранение настроения"""
@@ -346,7 +423,9 @@ async def save_mood(update: Update, mood_score: int):
     response = f"✅ Записал твое настроение: {mood_score}/10 {emoji}"
     
     if mood_score <= 4:
-        response += "\n\nВижу, что тяжелый день. Может, попробуешь технику релаксации?"
+        response += "\n\nВижу, что тяжелый день. Может, попробуешь технику релаксации или пообщаешься с помощником?"
+    elif mood_score >= 8:
+        response += "\n\nОтлично! Рад, что у тебя хороший день! ✨"
     
     await update.message.reply_text(response, reply_markup=get_main_keyboard())
 
@@ -355,18 +434,22 @@ async def save_mood(update: Update, mood_score: int):
 async def root():
     status = "MindMate Bot v2.0 is running! 🚀"
     if bot_app:
-        status += f" (Users: {len(user_data)})"
-    return {"status": status}
+        status += f" (Active users: {len(user_data)})"
+    return {"status": status, "features": ["AI Chat", "Crisis Help", "Mood Tracking"]}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
 @app.post("/webhook")
 async def webhook(request: dict):
-    """Endpoint для вебхука"""
+    """Endpoint для вебхука от Telegram"""
     if not bot_app:
         return {"status": "error", "message": "Bot not initialized"}
     
     try:
+        # Инициализация обработчиков при первом запросе
         if not bot_app.handlers:
-            # Регистрируем обработчики
             bot_app.add_handler(CommandHandler("start", start))
             bot_app.add_handler(CommandHandler("help", help_command))
             bot_app.add_handler(CommandHandler("mood", mood_command))
@@ -388,13 +471,20 @@ async def on_startup():
     """Настройка при запуске"""
     if bot_app:
         try:
-            # Получаем URL из Railway
+            # Получаем URL из окружения (Railway автоматически устанавливает)
             webhook_url = os.getenv('RAILWAY_STATIC_URL', '') + "/webhook"
-            if not webhook_url.startswith("http"):
-                webhook_url = "https://" + webhook_url + "/webhook"
             
-            await bot_app.bot.set_webhook(webhook_url)
-            logger.info(f"✅ Webhook установлен: {webhook_url}")
+            # Если URL не начинается с http, добавляем https
+            if webhook_url and not webhook_url.startswith("http"):
+                webhook_url = "https://" + webhook_url
+            
+            # Устанавливаем вебхук
+            if webhook_url and webhook_url.startswith("http"):
+                await bot_app.bot.set_webhook(webhook_url)
+                logger.info(f"✅ Webhook установлен: {webhook_url}")
+            else:
+                logger.warning("⚠️ Webhook URL not found or invalid")
+                
         except Exception as e:
             logger.error(f"❌ Webhook setup error: {e}")
 
